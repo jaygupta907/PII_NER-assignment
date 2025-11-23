@@ -1,6 +1,9 @@
 import os
 import argparse
 import json
+import math
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,28 +42,75 @@ class FocalLoss(nn.Module):
         return focal_loss.sum() / (mask.sum() + 1e-8)
 
 
+class EMA:
+    """Exponential Moving Average of model parameters."""
+
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        self.register(model)
+
+    def register(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+
+    def apply_shadow(self, model):
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name].clone()
+
+    def restore(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data = self.backup[name].clone()
+        self.backup = {}
+
+
+def set_seed(seed: int):
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_name", default="bert-base-uncased")
+    ap.add_argument("--model_name", default="microsoft/deberta-v3-base")
     ap.add_argument("--train", default="data/train.jsonl")
     ap.add_argument("--dev", default="data/dev.jsonl")
     ap.add_argument("--out_dir", default="out")
     ap.add_argument("--batch_size", type=int, default=8)
-    ap.add_argument("--epochs", type=int, default=25)
-    ap.add_argument("--lr", type=float, default=2e-5)
-    ap.add_argument("--max_length", type=int, default=384)
+    ap.add_argument("--epochs", type=int, default=24)
+    ap.add_argument("--lr", type=float, default=2e-5, help="Base learning rate (used if encoder/head LR not set)")
+    ap.add_argument("--encoder_lr", type=float, default=None, help="Learning rate for encoder/backbone")
+    ap.add_argument("--head_lr", type=float, default=None, help="Learning rate for classifier head")
+    ap.add_argument("--max_length", type=int, default=448)
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--gradient_clip", type=float, default=1.0)
-    ap.add_argument("--warmup_ratio", type=float, default=0.1)
-    ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--warmup_ratio", type=float, default=0.08)
+    ap.add_argument("--dropout", type=float, default=0.15)
     ap.add_argument("--scheduler", type=str, default="cosine", choices=["linear", "cosine"])
     ap.add_argument("--gradient_accumulation_steps", type=int, default=4)
     ap.add_argument("--use_focal_loss", action="store_true")
     ap.add_argument("--no_focal_loss", dest="use_focal_loss", action="store_false")
     ap.set_defaults(use_focal_loss=True)
-    ap.add_argument("--focal_gamma", type=float, default=1.5)
-    ap.add_argument("--focal_alpha", type=float, default=0.75)
+    ap.add_argument("--focal_gamma", type=float, default=1.3)
+    ap.add_argument("--focal_alpha", type=float, default=0.8)
     ap.add_argument("--label_smoothing", type=float, default=0.0)
+    ap.add_argument("--ema_decay", type=float, default=0.998, help="EMA decay (0 disables EMA)")
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--eval_steps", type=int, default=None, help="Evaluate every N steps (None = end of epoch)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return ap.parse_args()
@@ -183,6 +233,7 @@ def evaluate_model(model, tokenizer, dev_path, device, max_length):
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    set_seed(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     train_ds = PIIDataset(args.train, tokenizer, LABELS, max_length=args.max_length, is_train=True)
@@ -206,15 +257,36 @@ def main():
         loss_fn = None
         print("Using standard CrossEntropyLoss")
 
+    encoder_lr = args.encoder_lr or args.lr
+    head_lr = args.head_lr or (encoder_lr * 1.5)
+
+    encoder_params = []
+    head_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        name_lower = name.lower()
+        if any(head_key in name_lower for head_key in ["classifier", "qa_outputs", "crf"]):
+            head_params.append(param)
+        else:
+            encoder_params.append(param)
+
+    optimizer_grouped_parameters = [
+        {"params": encoder_params, "lr": encoder_lr, "weight_decay": args.weight_decay},
+    ]
+    if head_params:
+        optimizer_grouped_parameters.append({"params": head_params, "lr": head_lr, "weight_decay": 0.0})
+
     optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=args.lr, 
-        weight_decay=args.weight_decay,
+        optimizer_grouped_parameters,
         betas=(0.9, 0.999),
-        eps=1e-8
+        eps=1e-8,
     )
+    print(f"Encoder LR: {encoder_lr:.2e}, Head LR: {head_lr:.2e}")
+
     # Account for gradient accumulation in total steps
-    total_steps = (len(train_dl) // args.gradient_accumulation_steps) * args.epochs
+    steps_per_epoch = math.ceil(len(train_dl) / args.gradient_accumulation_steps)
+    total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(args.warmup_ratio * total_steps)
     
     if args.scheduler == "cosine":
@@ -231,17 +303,56 @@ def main():
             num_training_steps=total_steps
         )
 
+    ema = None
+    if args.ema_decay and 0.0 < args.ema_decay < 1.0:
+        ema = EMA(model, decay=args.ema_decay)
+        print(f"Using EMA with decay={args.ema_decay}")
+
     best_macro_f1 = 0.0
     patience = 10  # Even more patience for exploration
     patience_counter = 0
     no_improve_epochs = 0
+    global_step = 0
+
+    def evaluate_and_maybe_save(prefix: str, current_epoch: int):
+        nonlocal best_macro_f1, patience_counter, no_improve_epochs
+        if not args.dev:
+            return None, False
+        if ema:
+            ema.apply_shadow(model)
+        macro_f1 = evaluate_model(model, tokenizer, args.dev, args.device, args.max_length)
+        if ema:
+            ema.restore(model)
+        print(f"{prefix} dev Macro-F1: {macro_f1:.4f}")
+
+        should_stop = False
+        if macro_f1 > best_macro_f1:
+            best_macro_f1 = macro_f1
+            patience_counter = 0
+            no_improve_epochs = 0
+            model.save_pretrained(args.out_dir)
+            tokenizer.save_pretrained(args.out_dir)
+            print(f"✓ New best model saved! Macro-F1: {macro_f1:.4f}")
+        else:
+            patience_counter += 1
+            no_improve_epochs += 1
+            if patience_counter >= patience and current_epoch >= 10:
+                print(f"Early stopping triggered after {current_epoch+1} epochs (no improvement for {patience} epochs)")
+                should_stop = True
+            if no_improve_epochs >= 5 and no_improve_epochs % 3 == 0:
+                for param_group in optimizer.param_groups:
+                    old_lr = param_group["lr"]
+                    new_lr = max(old_lr * 0.5, 1e-6)
+                    param_group["lr"] = new_lr
+                    print(f"Reducing learning rate from {old_lr:.2e} to {new_lr:.2e}")
+        return macro_f1, should_stop
 
     for epoch in range(args.epochs):
         running_loss = 0.0
         model.train()
         optimizer.zero_grad()
-        
-        for step, batch in enumerate(tqdm(train_dl, desc=f"Epoch {epoch+1}/{args.epochs}")):
+        epoch_iterator = tqdm(train_dl, desc=f"Epoch {epoch+1}/{args.epochs}")
+        for step, batch in enumerate(epoch_iterator):
             input_ids = torch.tensor(batch["input_ids"], device=args.device)
             attention_mask = torch.tensor(batch["attention_mask"], device=args.device)
             labels = torch.tensor(batch["labels"], device=args.device)
@@ -272,35 +383,25 @@ def main():
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                if ema:
+                    ema.update(model)
+                global_step += 1
+
+                if args.eval_steps and args.eval_steps > 0 and args.dev and global_step % args.eval_steps == 0:
+                    _, should_stop = evaluate_and_maybe_save(prefix=f"Step {global_step}", current_epoch=epoch)
+                    if should_stop:
+                        print("Stopping training based on step-level evaluation.")
+                        print(f"Training completed. Best Macro-F1: {best_macro_f1:.4f}")
+                        return
 
         avg_loss = running_loss / max(1, len(train_dl))
         print(f"Epoch {epoch+1} average loss: {avg_loss:.4f}")
         
         # Evaluate on dev set
         if args.dev:
-            macro_f1 = evaluate_model(model, tokenizer, args.dev, args.device, args.max_length)
-            print(f"Epoch {epoch+1} dev Macro-F1: {macro_f1:.4f}")
-            
-            if macro_f1 > best_macro_f1:
-                best_macro_f1 = macro_f1
-                patience_counter = 0
-                no_improve_epochs = 0
-                model.save_pretrained(args.out_dir)
-                tokenizer.save_pretrained(args.out_dir)
-                print(f"✓ New best model saved! Macro-F1: {macro_f1:.4f}")
-            else:
-                patience_counter += 1
-                no_improve_epochs += 1
-                # Only stop if no improvement for patience epochs AND we're past epoch 10
-                if patience_counter >= patience and epoch >= 10:
-                    print(f"Early stopping triggered after {epoch+1} epochs (no improvement for {patience} epochs)")
-                    break
-                # Also try learning rate reduction if stuck
-                if no_improve_epochs >= 5 and no_improve_epochs % 3 == 0:
-                    for param_group in optimizer.param_groups:
-                        old_lr = param_group['lr']
-                        param_group['lr'] = old_lr * 0.5
-                        print(f"Reducing learning rate from {old_lr:.2e} to {param_group['lr']:.2e}")
+            _, should_stop = evaluate_and_maybe_save(prefix=f"Epoch {epoch+1}", current_epoch=epoch)
+            if should_stop:
+                break
     
     # Save final model if no dev set evaluation or if best wasn't saved
     if not args.dev or best_macro_f1 == 0.0:
