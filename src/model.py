@@ -1,26 +1,10 @@
-from transformers import AutoModelForTokenClassification
-from labels import LABEL2ID, ID2LABEL
-
-
-def create_model(model_name: str):
-    model = AutoModelForTokenClassification.from_pretrained(
-        model_name,
-        num_labels=len(LABEL2ID),
-        id2label=ID2LABEL,
-        label2id=LABEL2ID,
-    )
-    return model
-
-
-
 from transformers import AutoModelForTokenClassification, AutoConfig
 from labels import LABEL2ID, ID2LABEL
 
 
-def create_model(model_name: str, dropout: float = 0.1):
+def create_model(model_name: str, dropout: float = 0.1, label_smoothing: float = 0.0):
     """
-    Create a lightweight token classification model with configurable dropout.
-    Uses DistilBERT for fast inference while maintaining accuracy.
+    Create a token classification model with configurable dropout and label smoothing.
     """
     # Load config and modify dropout
     config = AutoConfig.from_pretrained(model_name)
@@ -40,4 +24,8 @@ def create_model(model_name: str, dropout: float = 0.1):
         model_name,
         config=config,
     )
+    
+    # Store label smoothing for use in loss computation
+    model.config.label_smoothing_factor = label_smoothing
+    
     return model
