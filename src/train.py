@@ -91,18 +91,18 @@ def parse_args():
     ap.add_argument("--train", default="data/train.jsonl")
     ap.add_argument("--dev", default="data/dev.jsonl")
     ap.add_argument("--out_dir", default="out")
-    ap.add_argument("--batch_size", type=int, default=8)
-    ap.add_argument("--epochs", type=int, default=24)
-    ap.add_argument("--lr", type=float, default=2e-5, help="Base learning rate (used if encoder/head LR not set)")
+    ap.add_argument("--batch_size", type=int, default=12)
+    ap.add_argument("--epochs", type=int, default=18)
+    ap.add_argument("--lr", type=float, default=3e-5, help="Base learning rate (used if encoder/head LR not set)")
     ap.add_argument("--encoder_lr", type=float, default=None, help="Learning rate for encoder/backbone")
     ap.add_argument("--head_lr", type=float, default=None, help="Learning rate for classifier head")
-    ap.add_argument("--max_length", type=int, default=448)
+    ap.add_argument("--max_length", type=int, default=384)
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--gradient_clip", type=float, default=1.0)
-    ap.add_argument("--warmup_ratio", type=float, default=0.08)
+    ap.add_argument("--warmup_ratio", type=float, default=0.05)
     ap.add_argument("--dropout", type=float, default=0.15)
-    ap.add_argument("--scheduler", type=str, default="cosine", choices=["linear", "cosine"])
-    ap.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    ap.add_argument("--scheduler", type=str, default="linear", choices=["linear", "cosine"])
+    ap.add_argument("--gradient_accumulation_steps", type=int, default=2)
     ap.add_argument("--use_focal_loss", action="store_true")
     ap.add_argument("--no_focal_loss", dest="use_focal_loss", action="store_false")
     ap.set_defaults(use_focal_loss=True)
@@ -309,7 +309,7 @@ def main():
         print(f"Using EMA with decay={args.ema_decay}")
 
     best_macro_f1 = 0.0
-    patience = 10  # Even more patience for exploration
+    patience = 6  # Tighter patience so we adapt faster
     patience_counter = 0
     no_improve_epochs = 0
     global_step = 0
