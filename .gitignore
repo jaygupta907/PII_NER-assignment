@@ -1,0 +1,56 @@
+# Model files and checkpoints
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.h5
+*.hdf5
+
+# Model directories
+out/
+checkpoints/
+models/
+saved_models/
+
+# PyTorch specific
+*.pth.tar
+*.pt.tar
+
+# TensorFlow/Keras
+*.pb
+*.tflite
+*.h5
+
+# Hugging Face cache
+.cache/
+.huggingface/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and data
+*.log
+*.csv
+*.tsv
+
