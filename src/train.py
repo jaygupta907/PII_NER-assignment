@@ -1,49 +1,13 @@
 import os
 import argparse
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from dataset import PIIDataset, collate_batch
-from labels import LABELS, LABEL2ID
+from labels import LABELS
 from model import create_model
-
-
-class FocalLoss(nn.Module):
-    """
-    Focal Loss for addressing class imbalance by focusing on hard examples.
-    This helps EMAIL class without explicitly weighting it.
-    """
-    def __init__(self, alpha=1.0, gamma=2.0, ignore_index=-100):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.ignore_index = ignore_index
-    
-    def forward(self, logits, targets):
-        # Flatten for loss computation
-        logits_flat = logits.view(-1, logits.size(-1))
-        targets_flat = targets.view(-1)
-        
-        # Compute cross entropy
-        ce_loss = F.cross_entropy(logits_flat, targets_flat, 
-                                  ignore_index=self.ignore_index, 
-                                  reduction='none')
-        
-        # Compute probabilities
-        pt = torch.exp(-ce_loss)
-        
-        # Compute focal loss: alpha * (1 - pt)^gamma * CE
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        
-        # Mask out ignored indices
-        mask = (targets_flat != self.ignore_index).float()
-        focal_loss = focal_loss * mask
-        
-        return focal_loss.sum() / (mask.sum() + 1e-8)
 
 
 def parse_args():
@@ -53,12 +17,9 @@ def parse_args():
     ap.add_argument("--dev", default="data/dev.jsonl")
     ap.add_argument("--out_dir", default="out")
     ap.add_argument("--batch_size", type=int, default=8)
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--max_length", type=int, default=256)
-    ap.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss gamma parameter")
-    ap.add_argument("--focal_alpha", type=float, default=1.0, help="Focal loss alpha parameter")
-    ap.add_argument("--use_focal_loss", action="store_true", help="Use focal loss instead of standard CE loss")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return ap.parse_args()
 
@@ -81,14 +42,6 @@ def main():
     model.to(args.device)
     model.train()
 
-    # Use focal loss if specified, otherwise use standard loss
-    if args.use_focal_loss:
-        loss_fn = FocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma, ignore_index=-100)
-        print(f"Using Focal Loss (alpha={args.focal_alpha}, gamma={args.focal_gamma})")
-    else:
-        loss_fn = None
-        print("Using standard CrossEntropyLoss")
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     total_steps = len(train_dl) * args.epochs
     scheduler = get_linear_schedule_with_warmup(
@@ -102,15 +55,8 @@ def main():
             attention_mask = torch.tensor(batch["attention_mask"], device=args.device)
             labels = torch.tensor(batch["labels"], device=args.device)
 
-            if loss_fn is not None:
-                # Use focal loss
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                logits = outputs.logits
-                loss = loss_fn(logits, labels)
-            else:
-                # Use standard loss
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
 
             optimizer.zero_grad()
             loss.backward()

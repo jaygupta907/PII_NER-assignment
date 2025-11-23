@@ -1,34 +1,9 @@
 import json
 import argparse
 import torch
-import re
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 from labels import ID2LABEL, label_is_pii
 import os
-
-
-def is_valid_email(text):
-    """
-    Validate EMAIL using regex pattern.
-    This helps filter out false positives for EMAIL class.
-    """
-    # Basic email pattern: local@domain
-    # More lenient pattern to catch various email formats
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    
-    # Clean the text (remove extra whitespace)
-    text_clean = text.strip()
-    
-    # Check if it matches email pattern
-    if re.match(email_pattern, text_clean):
-        return True
-    
-    # Also check for emails with subdomains or longer TLDs
-    extended_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\.[a-zA-Z]{2,})?$'
-    if re.match(extended_pattern, text_clean):
-        return True
-    
-    return False
 
 
 def bio_to_spans(text, offsets, label_ids):
@@ -68,63 +43,6 @@ def bio_to_spans(text, offsets, label_ids):
         spans.append((current_start, current_end, current_label))
 
     return spans
-
-
-def find_email_patterns(text):
-    """
-    Find EMAIL patterns in text using regex as a second-pass detection.
-    This helps improve recall for EMAIL class.
-    Returns list of (start, end) tuples.
-    """
-    email_pattern = r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
-    matches = []
-    for match in re.finditer(email_pattern, text):
-        matches.append((match.start(), match.end()))
-    return matches
-
-
-def validate_email_spans(text, spans):
-    """
-    Post-process spans to validate EMAIL predictions using regex.
-    Removes invalid EMAIL predictions to improve precision.
-    Also adds missed EMAIL patterns to improve recall.
-    """
-    validated_spans = []
-    email_spans_found = set()
-    
-    # First, validate existing EMAIL predictions
-    for start, end, label in spans:
-        if label == "EMAIL":
-            # Extract the text span
-            span_text = text[start:end]
-            # Validate using regex
-            if is_valid_email(span_text):
-                validated_spans.append((start, end, label))
-                email_spans_found.add((start, end))
-            # If invalid, skip this EMAIL prediction (improves precision)
-        else:
-            # Keep non-EMAIL spans as-is
-            validated_spans.append((start, end, label))
-    
-    # Second pass: Find EMAIL patterns that might have been missed
-    # This helps improve recall
-    email_patterns = find_email_patterns(text)
-    for start, end in email_patterns:
-        # Only add if not already found and doesn't overlap with existing spans
-        if (start, end) not in email_spans_found:
-            # Check for overlap with existing spans
-            overlaps = False
-            for s, e, _ in validated_spans:
-                if not (end <= s or start >= e):  # Overlap detected
-                    overlaps = True
-                    break
-            if not overlaps:
-                validated_spans.append((start, end, "EMAIL"))
-    
-    # Sort spans by start position
-    validated_spans.sort(key=lambda x: x[0])
-    
-    return validated_spans
 
 
 def main():
@@ -169,9 +87,6 @@ def main():
                 pred_ids = logits.argmax(dim=-1).cpu().tolist()
 
             spans = bio_to_spans(text, offsets, pred_ids)
-            # Validate EMAIL predictions using regex
-            spans = validate_email_spans(text, spans)
-            
             ents = []
             for s, e, lab in spans:
                 ents.append(
