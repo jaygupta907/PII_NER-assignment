@@ -42,32 +42,12 @@ class PIIDataset(Dataset):
                 attention_mask = enc["attention_mask"]
 
                 bio_tags = []
-                for i, (start, end) in enumerate(offsets):
+                for (start, end) in offsets:
                     if start == end:
                         bio_tags.append("O")
                     else:
                         if start < len(char_tags):
-                            tag = char_tags[start]
-                            # Better handling: if previous token was part of an entity and this is continuation
-                            # but got O tag, check if we should use I-tag instead
-                            if tag == "O" and i > 0 and len(bio_tags) > 0:
-                                prev_tag = bio_tags[-1]
-                                if prev_tag != "O" and prev_tag.startswith("I-"):
-                                    # Check if we're still in the same entity span
-                                    prev_start = offsets[i-1][0] if i > 0 else 0
-                                    # Look for entity in the range
-                                    for check_pos in range(max(0, prev_start), min(start + 1, len(char_tags))):
-                                        if check_pos < len(char_tags) and char_tags[check_pos].startswith("B-"):
-                                            ent_type = char_tags[check_pos].split("-", 1)[1]
-                                            tag = f"I-{ent_type}"
-                                            break
-                            # Handle truncation: if token is at end and previous was I-tag, keep it
-                            elif tag == "O" and i > 0 and len(bio_tags) > 0:
-                                prev_tag = bio_tags[-1]
-                                if prev_tag.startswith("I-") and end >= len(text) - 1:
-                                    # Likely truncated - keep the I-tag
-                                    tag = prev_tag
-                            bio_tags.append(tag)
+                            bio_tags.append(char_tags[start])
                         else:
                             bio_tags.append("O")
 

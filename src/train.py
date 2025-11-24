@@ -117,7 +117,7 @@ def parse_args():
 
 
 def bio_to_spans(text, offsets, label_ids):
-    """Convert BIO labels to spans."""
+    """Convert BIO labels to spans with improved handling."""
     spans = []
     current_label = None
     current_start = None
@@ -125,7 +125,12 @@ def bio_to_spans(text, offsets, label_ids):
 
     for (start, end), lid in zip(offsets, label_ids):
         if start == 0 and end == 0:
+            # Special tokens - end current span
+            if current_label is not None:
+                spans.append((current_start, current_end, current_label))
+                current_label = None
             continue
+        
         label = ID2LABEL.get(int(lid), "O")
         if label == "O":
             if current_label is not None:
@@ -133,7 +138,15 @@ def bio_to_spans(text, offsets, label_ids):
                 current_label = None
             continue
 
-        prefix, ent_type = label.split("-", 1)
+        try:
+            prefix, ent_type = label.split("-", 1)
+        except ValueError:
+            # Invalid label format
+            if current_label is not None:
+                spans.append((current_start, current_end, current_label))
+                current_label = None
+            continue
+
         if prefix == "B":
             if current_label is not None:
                 spans.append((current_start, current_end, current_label))
@@ -142,8 +155,10 @@ def bio_to_spans(text, offsets, label_ids):
             current_end = end
         elif prefix == "I":
             if current_label == ent_type:
+                # Valid continuation
                 current_end = end
             else:
+                # Invalid I-tag - treat as B-tag to recover
                 if current_label is not None:
                     spans.append((current_start, current_end, current_label))
                 current_label = ent_type
