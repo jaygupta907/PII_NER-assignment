@@ -13,6 +13,7 @@ out/
 checkpoints/
 models/
 saved_models/
+test_src/
 
 # PyTorch specific
 *.pth.tar
